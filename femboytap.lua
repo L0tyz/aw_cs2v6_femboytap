@@ -1074,7 +1074,10 @@ local cbModelPersist = vSsec:Checkbox("Persist (reapply each round)", C.getModel
 local playerListData = {}
 
 local function refreshPlayerCombo()
-    local players = C.listPlayers and C.listPlayers() or {}
+    local players = {}
+    pcall(function()
+        if C.listPlayers then players = C.listPlayers() or {} end
+    end)
     table.sort(players, function(a, b)
         if a.is_local ~= b.is_local then return a.is_local end
         return (a.name or "") < (b.name or "")
@@ -1087,8 +1090,10 @@ local function refreshPlayerCombo()
         names[#names + 1] = label
     end
     if #names == 0 then names[1] = "(no alive players)" end
-    cmbModelPlayerWd.options = names
-    if (cmbModelPlayerWd.value or 1) > #names then cmbModelPlayerWd.value = 1 end
+    if cmbModelPlayerWd then
+        cmbModelPlayerWd.options = names
+        if (cmbModelPlayerWd.value or 1) > #names then cmbModelPlayerWd.value = 1 end
+    end
 end
 
 local function selectedModelPath()
@@ -1107,26 +1112,28 @@ end
 
 vSsec:Button("Refresh players", function()
     refreshPlayerCombo()
-    M:Notify("players: " .. tostring(#playerListData))
+    pcall(function() M:Notify("players: " .. tostring(#playerListData)) end)
 end)
 vSsec:Button("Apply model to target", function()
     local path = selectedModelPath()
-    if not path then M:Notify("select a model first"); return end
+    if not path then pcall(function() M:Notify("select a model first") end); return end
     local mode = cmbModelTarget:Get() or 1
-    C.setModelPersist(cbModelPersist:Get())
-    local n = C.applyModelTarget(mode, selectedPlayerKey(), path)
-    M:Notify(string.format("applied to %d player(s)", n or 0))
+    pcall(function() C.setModelPersist(cbModelPersist:Get()) end)
+    local n = 0
+    pcall(function() n = C.applyModelTarget(mode, selectedPlayerKey(), path) or 0 end)
+    pcall(function() M:Notify(string.format("applied to %d player(s)", n)) end)
 end)
 vSsec:Button("Clear target models", function()
     local mode = cmbModelTarget:Get() or 1
-    local n = C.clearModelTarget(mode, selectedPlayerKey())
-    M:Notify(string.format("cleared %d assignment(s)", n or 0))
+    local n = 0
+    pcall(function() n = C.clearModelTarget(mode, selectedPlayerKey()) or 0 end)
+    pcall(function() M:Notify(string.format("cleared %d assignment(s)", n)) end)
 end)
 vSsec:Button("Clear all model assignments", function()
-    C.clearAllModels()
+    pcall(function() C.clearAllModels() end)
     lastModelSel = 1
     if modelWd then modelWd.value = 1 end
-    M:Notify("all model assignments cleared")
+    pcall(function() M:Notify("all model assignments cleared") end)
 end)
 
 local lastPersist = cbModelPersist:Get()
@@ -1134,13 +1141,15 @@ local function syncModelPersist()
     local on = cbModelPersist:Get()
     if on == lastPersist then return end
     lastPersist = on
-    C.setModelPersist(on)
+    pcall(function() C.setModelPersist(on) end)
 end
 
 local playerRefreshTick = 0
 local function syncPlayerList()
     playerRefreshTick = playerRefreshTick + 1
-    if playerRefreshTick == 90 or playerRefreshTick % 180 == 0 then
+    -- only refresh in-game, and not on the very first frames after inject
+    if playerRefreshTick < 120 then return end
+    if playerRefreshTick == 120 or playerRefreshTick % 300 == 0 then
         pcall(refreshPlayerCombo)
     end
 end
@@ -1547,8 +1556,8 @@ do
     lastModelAlt = cbModelAlt:Get()
     if C.getModelPersist then cbModelPersist:Set(C.getModelPersist()) end
     lastPersist = cbModelPersist:Get()
-    reloadModelList()
-    pcall(refreshPlayerCombo)
+    pcall(reloadModelList)
+    -- do NOT refresh players at inject time (entity list may be unsafe)
 end
 
 do

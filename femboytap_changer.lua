@@ -751,11 +751,17 @@ end
 
 local function entity_by_index(idx)
     if not idx or idx <= 0 or idx > 0x7fff then return nil end
-    local base = mem.GetModuleBase(DLL); if not base then return nil end
-    local elist = r_ptr(base + off.dwEntityList); if not valid(elist) then return nil end
-    local chunk = r_ptr(elist + 8 * rshift(idx, 9) + 16); if not valid(chunk) then return nil end
-    local e = r_ptr(chunk + 112 * band(idx, 0x1FF))
-    if valid(e) and valid(r_ptr(e)) then return e end
+    if not off.dwEntityList then return nil end
+    if not in_game() then return nil end
+    local ok, ent = pcall(function()
+        local base = mem.GetModuleBase(DLL); if not base then return nil end
+        local elist = r_ptr(base + off.dwEntityList); if not valid(elist) then return nil end
+        local chunk = r_ptr(elist + 8 * rshift(idx, 9) + 16); if not valid(chunk) then return nil end
+        local e = r_ptr(chunk + 112 * band(idx, 0x1FF))
+        if valid(e) and valid(r_ptr(e)) then return e end
+        return nil
+    end)
+    if ok and valid(ent) then return ent end
     return nil
 end
 
@@ -782,7 +788,9 @@ local function player_key(pawn, is_local)
         local ctrl = pawn:GetPropEntity("m_hController")
         if ctrl then
             sid = ctrl:GetProp("m_steamID")
-            if not sid or sid == 0 then sid = ctrl:GetPropInt and ctrl:GetPropInt("m_steamID") end
+            if not sid or sid == 0 then
+                if ctrl.GetPropInt then sid = ctrl:GetPropInt("m_steamID") end
+            end
         end
     end)
     if sid and tonumber(sid) and tonumber(sid) > 0 then return "s:" .. tostring(sid) end
@@ -793,15 +801,15 @@ end
 
 local function collect_alive_players()
     local out = {}
+    local ok_f, pawns = pcall(entities.FindByClass, "C_CSPlayerPawn")
+    if not ok_f or not pawns then return out end
+
     local ok_lp, lp = pcall(entities.GetLocalPlayer)
     if not ok_lp or not lp then
         ok_lp, lp = pcall(entities.GetLocalPawn)
     end
     local lp_idx = -1
     if ok_lp and lp then pcall(function() lp_idx = lp:GetIndex() end) end
-
-    local ok_f, pawns = pcall(entities.FindByClass, "C_CSPlayerPawn")
-    if not ok_f or not pawns then return out end
 
     for _, pawn in pairs(pawns) do
         local alive, idx, team = false, 0, 0
@@ -811,18 +819,15 @@ local function collect_alive_players()
             pcall(function() team = pawn:GetTeamNumber() end)
             if idx and idx > 0 then
                 local is_local = (idx == lp_idx)
-                local raw = entity_by_index(idx)
-                if valid(raw) then
-                    out[#out + 1] = {
-                        pawn = pawn,
-                        raw = raw,
-                        idx = idx,
-                        team = team or 0,
-                        is_local = is_local,
-                        name = player_display_name(pawn),
-                        key = player_key(pawn, is_local),
-                    }
-                end
+                out[#out + 1] = {
+                    pawn = pawn,
+                    raw = nil, -- resolve lazily only when applying in-game
+                    idx = idx,
+                    team = team or 0,
+                    is_local = is_local,
+                    name = player_display_name(pawn),
+                    key = player_key(pawn, is_local),
+                }
             end
         end
     end
@@ -842,8 +847,15 @@ end
 
 local function apply_path_to_player(info, path)
     if not info or not path or path == "" then return false end
+    if not in_game() then return false end
     if not model_needs_apply(info, path) then return false end
-    if safe_set_model(info.raw, path) then
+    local raw = info.raw
+    if not valid(raw) then
+        raw = entity_by_index(info.idx)
+        info.raw = raw
+    end
+    if not valid(raw) then return false end
+    if safe_set_model(raw, path) then
         state.modelApplied[info.key] = path
         if info.is_local then
             state.appliedLocalModel = path
@@ -856,28 +868,32 @@ end
 
 local function apply_all_model_assignments()
     if not fnptr.set_model then return end
-    local players = collect_alive_players()
+    if not in_game() then return end
+    if not next(state.modelAssignments) and not (state.localModel and state.localModel ~= "") then
+        return
+    end
+    local ok, players = pcall(collect_alive_players)
+    if not ok or not players then return end
     for _, info in ipairs(players) do
         local path = state.modelAssignments[info.key]
         if (not path or path == "") and info.is_local then
             path = state.localModel
         end
         if path and path ~= "" then
-            apply_path_to_player(info, path)
+            pcall(apply_path_to_player, info, path)
         end
     end
 end
 
 local function apply_local_model(pawn, lp)
-    -- kept for compatibility; multi path goes through apply_all_model_assignments
     if not fnptr.set_model then return end
     if not valid(pawn) then return end
+    if not in_game() then return end
     local path = state.modelAssignments["local"] or state.localModel
     if path and path ~= "" then
-        local info = {
-            pawn = lp, raw = pawn, key = "local", is_local = true,
-        }
-        if not info.pawn then return end
+        if not lp then return end
+        local info = { pawn = lp, raw = pawn, key = "local", is_local = true, idx = 0 }
+        pcall(function() info.idx = lp:GetIndex() end)
         apply_path_to_player(info, path)
     else
         if state.appliedLocalModel == "OFF" then return end
@@ -887,6 +903,7 @@ local function apply_local_model(pawn, lp)
 end
 
 local function assign_models_to_target(mode, selected_key, path)
+    if not in_game() then return 0 end
     local players = collect_alive_players()
     local lp_team = 0
     for _, info in ipairs(players) do
@@ -909,7 +926,7 @@ local function assign_models_to_target(mode, selected_key, path)
                 state.modelAssignments[info.key] = path
                 if info.is_local then state.localModel = path end
                 state.modelApplied[info.key] = nil
-                apply_path_to_player(info, path)
+                pcall(apply_path_to_player, info, path)
             else
                 state.modelAssignments[info.key] = nil
                 state.modelApplied[info.key] = nil
@@ -921,7 +938,7 @@ local function assign_models_to_target(mode, selected_key, path)
             count = count + 1
         end
     end
-    Config.save()
+    pcall(Config.save)
     return count
 end
 
@@ -934,7 +951,7 @@ local function clear_all_model_assignments()
     state.modelApplied = {}
     state.localModel = nil
     state.appliedLocalModel = nil
-    Config.save()
+    pcall(Config.save)
 end
 
 local function run()
