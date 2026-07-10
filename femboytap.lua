@@ -213,7 +213,9 @@ do
         return true
     end
 
-    pcall(function() ok = install() end)
+    -- Disabled on load: code patch crashes after CS2 update (execute AV on unmapped RIP)
+    -- pcall(function() ok = install() end)
+    print("[femboytap] VM: auto-install disabled (safe mode)")
 
     function VM.set(on, x, y, z)
         if not ok or not page then return end
@@ -693,11 +695,13 @@ do
         RG.enumerate = enumerate
 
         local okI = false
-        pcall(function() okI = install() end)
+        -- Disabled: hardcoded steamnetworkingsockets RVAs cause execute AV on inject after update
+        -- pcall(function() okI = install() end)
+        -- if utils ~= nil and vtbl ~= nil then pcall(enumerate) end
         if utils ~= nil and vtbl ~= nil then pcall(enumerate) end
         RG.ok = okI
         if okI then print("[femboytap] region: hooked " .. #hooks .. " fns (" .. #RG.ids .. " pops)")
-        else            print("[femboytap] region: hook failed") end
+        else            print("[femboytap] region: auto-install disabled (safe mode)") end
     end
 
     if #RG.names == 0 then RG.names = { "[ join a server, then Refresh ]" } end
@@ -889,10 +893,11 @@ do
     end
 
     local okI = false
-    pcall(function() okI = install() end)
+    -- Disabled: SetInfo code patch crashes on inject after CS2 update
+    -- pcall(function() okI = install() end)
     NC.ok = okI
     if okI then print("[femboytap] namechanger: hooked SetInfo @ " .. string.format("%X", T))
-    else        print("[femboytap] namechanger: install failed") end
+    else        print("[femboytap] namechanger: auto-install disabled (safe mode)") end
 end
 pcall(function() callbacks.Register("Unload", function() pcall(NC.uninstall) end) end)
 
