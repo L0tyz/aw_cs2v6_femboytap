@@ -37,6 +37,7 @@ local FIELDS = {
     m_nFallbackSeed        = { "m_nFallbackSeed", "C_EconEntity" },
     m_flFallbackWear       = { "m_flFallbackWear", "C_EconEntity" },
     m_nFallbackStatTrak    = { "m_nFallbackStatTrak", "C_EconEntity" },
+    m_hViewmodelAttachment = { "m_hViewmodelAttachment", "C_EconEntity" },
     m_EconGloves           = { "m_EconGloves", "C_CSPlayerPawn" },
     m_bNeedToReApplyGloves = { "m_bNeedToReApplyGloves", "C_CSPlayerPawn" },
 
@@ -61,6 +62,33 @@ end)
 off.m_szWorldModel = 48
 off.m_modelState = off.m_modelState or 336
 off.m_hModel     = off.m_hModel     or 160
+off.m_hViewmodelAttachment = off.m_hViewmodelAttachment or 5808
+
+-- paint_index -> true if CS2 legacy UV (mesh mask 2). Source: ByMykel skins.json
+local LEGACY_PAINT = {}
+local SKINS_API = "https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/skins.json"
+pcall(function()
+    local j = http.Get(SKINS_API)
+    if type(j) ~= "string" or #j < 100 then
+        print("[changer] WARNING: skins.json legacy map unavailable -- defaulting mask=1")
+        return
+    end
+    local n = 0
+    for paint, legacy in j:gmatch('"paint_index"%s*:%s*"?(%d+)"?.-"legacy_model"%s*:%s*(true|false)') do
+        local id = tonumber(paint)
+        if id then
+            if legacy == "true" then LEGACY_PAINT[id] = true end
+            n = n + 1
+        end
+    end
+    if n == 0 then
+        print("[changer] WARNING: skins.json parsed 0 paints -- defaulting mask=1")
+    else
+        local leg = 0
+        for _ in pairs(LEGACY_PAINT) do leg = leg + 1 end
+        print(string.format("[changer] legacy map: %d paints, %d legacy", n, leg))
+    end
+end)
 
 local function r_u8 (a) return ffi.cast("uint8_t*",  a)[0] end
 local function r_u16(a) return ffi.cast("uint16_t*", a)[0] end
@@ -390,6 +418,31 @@ local function refresh_econ(wpn)
     vcall_void_bool(wpn, 110, true)
 end
 
+-- Mesh group: 1 = modern UV, 2 = legacy UV. Wrong mask = crooked/mirrored texture.
+local function weapon_mesh_mask(paint)
+    if paint and LEGACY_PAINT[paint] then return 2 end
+    return 1
+end
+
+local function apply_mesh_mask(ent, mask)
+    if not fnptr.set_mesh_mask or not valid(ent) then return end
+    local node = r_ptr(ent + off.m_pGameSceneNode)
+    if valid(node) then
+        pcall(function() fnptr.set_mesh_mask(ffi.cast("void*", node), mask) end)
+    end
+end
+
+local skin_dbg = {}
+local function dbg_paint(kind, paint, wpn, mask)
+    local key = kind .. ":" .. tostring(paint)
+    if skin_dbg[key] then return end
+    skin_dbg[key] = true
+    local rb = r_i32(wpn + off.m_nFallbackPaintKit)
+    local leg = (paint and LEGACY_PAINT[paint]) and "yes" or "no"
+    print(string.format("[changer] %s paint written=%d readback=%d mask=%s legacy=%s",
+        kind, paint, rb, mask and tostring(mask) or "-", leg))
+end
+
 local function apply_knife_model(wpn)
     if fnptr.set_model then
         local vdata = r_ptr(wpn + off.m_nSubclassID + 8)
@@ -398,10 +451,7 @@ local function apply_knife_model(wpn)
             if s:find("models/") and s:find("%.vmdl") then fnptr.set_model(ffi.cast("void*", wpn), s) end
         end
     end
-    if fnptr.set_mesh_mask then
-        local node = r_ptr(wpn + off.m_pGameSceneNode)
-        if valid(node) then fnptr.set_mesh_mask(ffi.cast("void*", node), 2) end
-    end
+    apply_mesh_mask(wpn, 2)
 end
 
 local function set_knife_subclass(wpn, def_target, quality)
@@ -551,6 +601,20 @@ local function handle_to_entity(elist, hnd)
     local e     = r_ptr(chunk + 112 * band(idx, 0x1FF))
     if valid(e) and valid(r_ptr(e)) then return e end
     return nil
+end
+
+-- First-person weapon mesh only (never HudModelArms — prior AV).
+local function apply_viewmodel_mesh(wpn, mask, elist)
+    if not elist or not off.m_hViewmodelAttachment then return end
+    local att = handle_to_entity(elist, r_u32(wpn + off.m_hViewmodelAttachment))
+    if att then apply_mesh_mask(att, mask) end
+end
+
+local function apply_weapon_meshes(wpn, paint, elist)
+    local mask = weapon_mesh_mask(paint)
+    apply_mesh_mask(wpn, mask)
+    apply_viewmodel_mesh(wpn, mask, elist)
+    return mask
 end
 
 local function pawn_alive(pawn)
@@ -1006,28 +1070,54 @@ local function run()
                     local def = r_u16(item_ptr(wpn) + off.m_iItemDefinitionIndex)
                     if is_knife(def) then
                         if state.resetKnife and not (kdef and kc) then
-                            restore_knife(wpn, pawn); applied[wpn] = nil; state.resetKnife = false; did = true
+                            restore_knife(wpn, pawn)
+                            applied["knife"] = nil
+                            state.resetKnife = false
+                            did = true
                         elseif kdef and kc then
                             local s = "k|"..kdef.."|"..kc.paint.."|"..kc.wear.."|"..kc.seed.."|"..tostring(kc.stat).."|"..tostring(kc.statval or 0)
-                            if applied[wpn] ~= s then
-                                process_knife(wpn, kdef, kc.paint, kc.wear, kc.seed, kc.stat, kc.statval); applied[wpn]=s; did=true
+                            if applied["knife"] ~= s then
+                                process_knife(wpn, kdef, kc.paint, kc.wear, kc.seed, kc.stat, kc.statval)
+                                apply_viewmodel_mesh(wpn, 2, elist)
+                                dbg_paint("knife", kc.paint, wpn, 2)
+                                applied["knife"] = s
+                                did = true
+                            else
+                                -- sticky paint + mesh (engine may reset mask)
+                                write_fallback(wpn, kc.paint, kc.wear, kc.seed, kc.stat, kc.statval)
+                                apply_mesh_mask(wpn, 2)
+                                apply_viewmodel_mesh(wpn, 2, elist)
                             end
                         end
                     else
+                        local key = "w:" .. def
                         if state.pendingReset[def] then
-                            restore_weapon(wpn); applied[wpn] = nil; state.pendingReset[def] = nil; did = true
+                            restore_weapon(wpn)
+                            applied[key] = nil
+                            state.pendingReset[def] = nil
+                            did = true
                         else
                             local c = state.cfg[def]
                             if c then
                                 if c.paint > 0 then
                                     local s = "w|"..c.paint.."|"..c.wear.."|"..c.seed.."|"..tostring(c.stat).."|"..tostring(c.statval or 0)
-                                    if applied[wpn] ~= s then
-                                        process_weapon(wpn, c.paint, c.wear, c.seed, c.stat, c.statval); applied[wpn]=s; did=true
+                                    local mask = weapon_mesh_mask(c.paint)
+                                    if applied[key] ~= s then
+                                        process_weapon(wpn, c.paint, c.wear, c.seed, c.stat, c.statval)
+                                        apply_weapon_meshes(wpn, c.paint, elist)
+                                        dbg_paint("weapon", c.paint, wpn, mask)
+                                        applied[key] = s
+                                        did = true
+                                    else
+                                        write_fallback(wpn, c.paint, c.wear, c.seed, c.stat, c.statval)
+                                        apply_mesh_mask(wpn, mask)
+                                        apply_viewmodel_mesh(wpn, mask, elist)
                                     end
                                 else
-                                    local s = "w|none"
-                                    if applied[wpn] ~= s then
-                                        restore_weapon(wpn); applied[wpn]=s; did=true
+                                    if applied[key] ~= "w|none" then
+                                        restore_weapon(wpn)
+                                        applied[key] = "w|none"
+                                        did = true
                                     end
                                 end
                             end
